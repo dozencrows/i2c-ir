@@ -1,40 +1,38 @@
-// Report received data as I2C slave on address 0x70.
-// See http://jeelabs.org/2015/01/28/lpc810-meets-rfm69-part-3/
+// Report data as I2C slave on address 0x70.
 
 #include "LPC8xx.h"
 #include "lpc_types.h"
 #include "romapi_8xx.h"
-
-#define chThdYield() // FIXME still used in rf69.h
-#include "spi.h"
-#include "rf69.h"
+#include "serial.h"
 
 #include <string.h>
 
-RF69<SpiDevice> rf;
-uint8_t rxBuf[66];
+#define FIXED_CLOCK_RATE_HZ     12000000
+#define FIXED_UART_BAUD_RATE    115200
 
-struct Payload {
-    uint8_t seq, len, rssi, lna;
-    uint16_t afc;
-    uint8_t buf[66];
-} out;                      // this is the data as returned over I2C
-
-uint32_t i2cBuffer [24];    // data area used by ROM-based I2C driver
+uint32_t i2cBuffer[24];     // data area used by ROM-based I2C driver
 I2C_HANDLE_T* ih;           // opaque handle used by ROM-based I2C driver
 I2C_PARAM_T i2cParam;       // input parameters for pending I2C request
 I2C_RESULT_T i2cResult;     // return values for pending I2C request
 
-uint8_t i2cRecvBuf [2];     // receive buffer: address + register number
+uint8_t i2cRecvBuf[2];      // receive buffer: address + register number
+uint8_t i2cSendBuf[32];     // send buffer 
+
+void delayMs(int milliseconds) {
+    LPC_MRT->Channel[2].INTVAL = (((FIXED_CLOCK_RATE_HZ / 250L) * milliseconds) >> 2) - 286;
+
+    while (LPC_MRT->Channel[2].STAT & 0x02)
+        ; //wait while running
+}
 
 void i2cSetupRecv (), i2cSetupSend (int); // forward
 
 void i2cSetup () {
     for (int i = 0; i < 3000000; ++i) __ASM("");
 
-    LPC_SWM->PINENABLE0 |= 1<<6;        // disable RESET, pin 1
-    LPC_SWM->PINASSIGN7 = 0x05FFFFFF;   // SDA on 5p1
-    LPC_SWM->PINASSIGN8 = 0xFFFFFF04;   // SCL on 4p2
+    LPC_SWM->PINENABLE0 |= 3<<2;            // disable SWCLK and SWDIO
+    LPC_SWM->PINASSIGN7 = 0x02FFFFFF;       // SDA on P2, pin 4
+    LPC_SWM->PINASSIGN8 = 0xFFFFFF03;       // SCL on P3, pin 3
     LPC_SYSCON->SYSAHBCLKCTRL |= 1<<5;  // enable I2C clock
 
     ih = LPC_I2CD_API->i2c_setup(LPC_I2C_BASE, i2cBuffer);
@@ -56,8 +54,6 @@ void i2cRecvDone (uint32_t err, uint32_t) {
 
 // called when I2C transmission has been completed
 void i2cSendDone (uint32_t err, uint32_t) {
-    if (err == 0)
-        out.len = 0;
     i2cSetupRecv();
 }
 
@@ -76,33 +72,26 @@ void i2cSetupSend (int regNum) {
     i2cParam.num_bytes_rec = 0;
     if (regNum == 0) {
         i2cParam.num_bytes_send = 1;
-        i2cParam.buffer_ptr_send = &out.len;
+        i2cSendBuf[0] = 0xff;
     } else {
-        i2cParam.num_bytes_send = out.len;
-        i2cParam.buffer_ptr_send = (uint8_t*) &out;
+        i2cParam.num_bytes_send = 16;
+        strcpy((char*)i2cSendBuf, "0123456789ABCDEF");
     }
+    i2cParam.buffer_ptr_send = i2cSendBuf;
     LPC_I2CD_API->i2c_slave_transmit_intr(ih, &i2cParam, &i2cResult);
 }
 
 int main () {
+    serial.init(LPC_USART0, FIXED_UART_BAUD_RATE);
+    delayMs(100);
+    puts("i2c-ir started");
     i2cSetup();
     i2cSetupRecv();
 
-    LPC_SWM->PINENABLE0 |= 3<<2;        // disable SWCLK/SWDIO
-    // lpc810 coin: sck=0p8, ssel=3p3, miso=2p4, mosi=1p5
-    LPC_SWM->PINASSIGN3 = 0x00FFFFFF;   // sck  -    -    -
-    LPC_SWM->PINASSIGN4 = 0xFF030201;   // -    nss  miso mosi
-
-    rf.init(1, 42, 8683);
+    puts("Waiting...");
     while (true) {
-        int len = rf.receive(rxBuf, sizeof rxBuf);
-        if (len >= 0) {
-            ++out.seq;
-            out.len = len + 6;
-            out.rssi = rf.rssi;
-            out.lna = rf.lna;
-            out.afc = rf.afc;
-            memcpy(out.buf, rxBuf, sizeof out.buf);
-        }
+        __WFI();
+        puts("Msg received");
     }
 }
+
