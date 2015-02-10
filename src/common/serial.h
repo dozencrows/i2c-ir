@@ -6,8 +6,10 @@ public:
     void init (UART* u, uint32_t baudRate) {
         uart = u;
 
-        const uint32_t uartclkdiv = 1;
-        const uint32_t SystemCoreClock = 12000000;
+        //const uint32_t uartclkdiv = 1;
+        //const uint32_t SystemCoreClock = 12000000;
+        const uint32_t uartclkdiv = 5;                  // Values for 10Mhz system clock from PLL
+        const uint32_t SystemCoreClock = 60000000;
 
         // TODO add support for uarts other than uart0
         LPC_SYSCON->UARTCLKDIV = uartclkdiv;

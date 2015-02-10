@@ -7,7 +7,7 @@
 
 #include <string.h>
 
-#define FIXED_CLOCK_RATE_HZ     12000000
+#define FIXED_CLOCK_RATE_HZ     10000000
 #define FIXED_UART_BAUD_RATE    115200
 
 uint32_t i2cBuffer[24];     // data area used by ROM-based I2C driver
@@ -18,11 +18,31 @@ I2C_RESULT_T i2cResult;     // return values for pending I2C request
 uint8_t i2cRecvBuf[2];      // receive buffer: address + register number
 uint8_t i2cSendBuf[32];     // send buffer 
 
+void timersInit() {
+    LPC_SYSCON->SYSAHBCLKCTRL |= (1<<10);    // enable MRT clock
+    LPC_SYSCON->PRESETCTRL &= ~(1<<7);       // reset MRT
+    LPC_SYSCON->PRESETCTRL |=  (1<<7);
+    
+    LPC_MRT->Channel[2].CTRL = (0x01 << 1); //MRT2 one-shot mode
+}
+
 void delayMs(int milliseconds) {
     LPC_MRT->Channel[2].INTVAL = (((FIXED_CLOCK_RATE_HZ / 250L) * milliseconds) >> 2) - 286;
 
     while (LPC_MRT->Channel[2].STAT & 0x02)
         ; //wait while running
+}
+
+void initMainClock() {
+    LPC_SYSCON->PDRUNCFG    &= ~(0x1 << 7);     // Power up PLL
+    LPC_SYSCON->SYSPLLCTRL  = 0x24;             // MSEL=4, PSEL=1 -> M=5, P=2 -> Fclkout = 60Mhz
+    while (!(LPC_SYSCON->SYSPLLSTAT & 0x01));   // Wait for PLL lock
+
+    LPC_SYSCON->MAINCLKSEL    = 0x03;           // Set main clock to PLL source and wait for update
+    LPC_SYSCON->SYSAHBCLKDIV  = 6;              // Set divider to get final system clock of 10Mhz
+    LPC_SYSCON->MAINCLKUEN    = 0x00;
+    LPC_SYSCON->MAINCLKUEN    = 0x01;
+    while (!(LPC_SYSCON->MAINCLKUEN & 0x01));
 }
 
 void i2cSetupRecv (), i2cSetupSend (int); // forward
@@ -82,6 +102,7 @@ void i2cSetupSend (int regNum) {
 }
 
 int main () {
+    initMainClock();
     serial.init(LPC_USART0, FIXED_UART_BAUD_RATE);
     delayMs(100);
     puts("i2c-ir started");
