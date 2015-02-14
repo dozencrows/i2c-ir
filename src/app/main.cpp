@@ -49,112 +49,108 @@ void initMainClock() {
 #define SW_MATCH_PERIOD         (FIXED_CLOCK_RATE_HZ / SW_FREQ)
 #define SW_MATCH_HALF_PERIOD    (SW_MATCH_PERIOD / 2)
 
-#define SW_MODULATE_PERIOD_ON   1000
-#define SW_MODULATE_PERIOD_OFF  1000
+#define SW_MODULATE_PERIOD_A_ON   1000
+#define SW_MODULATE_PERIOD_A_OFF  1000
+
+#define SW_MODULATE_PERIOD_B_ON   2000
+#define SW_MODULATE_PERIOD_B_OFF  2000
 
 volatile int g_nextSctModulate = 0;
 
-// Currently it looks like the toggling of start and stop of timer L via these is not consistent;
-// sometimes the interrupt to toggle them fires before the event affects timer L, sometimes not.
-// Alternative approach:
-//  * Configure event 3 to turn timer L on
-//  * Configure event 4 to turn timer L off, clear output, and be limit for timer L (reset to zero)
-//  * Configure match H 0 to zero & event 3 to fire on it
-//  * Configure match H 1 to on period & event 4 to fire on it
-//  * Configure match H 2 to on period + off period and limit for timer H
-//  * Configure event 4 to fire interrupt
-//  * Interrupt should:
-//    * update match reload for H 1 and 2 to next on, on+off periods
-//  * Turning on square wave:
-//    * Load match H 1 and 2 initial periods; also load second period values into reload regs
-//    * clear halt bit for timer L and set stop bit at same time 
-//    * clear halt bit for timer H
-//  * Turning off square wave:
-//    * set halt bits for timers L and H
-//    * set clear bits for timers L and H
-//    * clear output
-
-void sctSquareWaveModulateOn() {
-    LPC_SCT->MATCHREL[0].H  = SW_MODULATE_PERIOD_ON;
-    LPC_SCT->OUT[0].SET     |= 0x08;
-    LPC_SCT->OUT[0].CLR     &= ~0x08;
-    LPC_SCT->START_L        |= 0x08;
-    LPC_SCT->STOP_L         &= ~0x08;
+void sctSquareWaveModulateA() {
+    LPC_SCT->MATCHREL[0].H  = SW_MODULATE_PERIOD_A_ON + SW_MODULATE_PERIOD_A_OFF;
+    LPC_SCT->MATCHREL[2].H  = SW_MODULATE_PERIOD_A_ON;
     g_nextSctModulate       = 1;
 }
 
-void sctSquareWaveModulateOff() {
-    LPC_SCT->MATCHREL[0].H  = SW_MODULATE_PERIOD_OFF;
-    LPC_SCT->OUT[0].SET     &= ~0x08;
-    LPC_SCT->OUT[0].CLR     |= 0x08;
-    LPC_SCT->START_L        &= ~0x08;
-    LPC_SCT->STOP_L         |= 0x08;
+void sctSquareWaveModulateB() {
+    LPC_SCT->MATCHREL[0].H  = SW_MODULATE_PERIOD_B_ON + SW_MODULATE_PERIOD_B_OFF;
+    LPC_SCT->MATCHREL[2].H  = SW_MODULATE_PERIOD_B_ON;
     g_nextSctModulate       = 0;
 }
 
 extern "C" void SCT_IRQHandler(void) {
+    // For full IR send implementation, this handler should do the following:
+    // * If sequence end reached
+    //   * Configure event 1 to halt both timers and clear output
+    // * Else
+    //   * Load next H cycle period values into H timer match regs 0 and 2
+    //
     if (g_nextSctModulate) {
-        // L timer should be turned back on, and output
-        // turned back on by initial event 3
-        sctSquareWaveModulateOff();
+        sctSquareWaveModulateB();
     }
     else {
-        // Output should get turned off
-        // L timer should be stopped
-        //LPC_SCT->CTRL_L |= (1<<2)|(1<<3);
-        sctSquareWaveModulateOn();
+        sctSquareWaveModulateA();
     }
     LPC_SCT->EVFLAG = 0;
 }
 
 void initSCTSquareWave() {
-    // Turn on the clock to the SCT
-    LPC_SYSCON->SYSAHBCLKCTRL |= (1 << 8);
-    
-    // Set up output pin - (ISP)
-    LPC_SWM->PINASSIGN6 = 0x01FFFFFF;
 
-    LPC_SCT->CONFIG = 0;        // 16 bit counter timers
+    // ---------------------------------
+    // -- Common timer initialisation --
     
-    // Set up two match events for halfway through and at the end
+    LPC_SYSCON->SYSAHBCLKCTRL |= (1 << 8);  // Turn on the clock to the SCT
+    LPC_SWM->PINASSIGN6 = 0x01FFFFFF;       // Set up output pin - (ISP)
+    LPC_SCT->CONFIG = (1<<17)|(1<<18);      // H and L 16 bit counter timers, using match reg 0 each to limit
+
+    // ------------------------------------------------------
+    // -- L timer - generates carrier square wave at 38kHz --
+
+    // Use match reg 0 to define end of cycle, and act as auto limit
+    // Use match regs 1 and 2 to define events 1 and 2 for start and
+    // middle of cycle, turning output on and off respectively
     LPC_SCT->MATCH[0].L     = SW_MATCH_PERIOD;
     LPC_SCT->MATCHREL[0].L  = SW_MATCH_PERIOD;
-    LPC_SCT->MATCH[1].L     = SW_MATCH_HALF_PERIOD;
-    LPC_SCT->MATCHREL[1].L  = SW_MATCH_HALF_PERIOD;
-    LPC_SCT->MATCH[2].L     = 0;
-    LPC_SCT->MATCHREL[2].L  = 0;
-    
-    // Toggle output pin on events to generate square wave
-    LPC_SCT->OUT[0].SET     = 0x04;
-    LPC_SCT->OUT[0].CLR     = 0x02;
-    
-    // Set up event control to simply enable events 1, 2, and 3
-    // and associate them with L counter, match registers 0, 1 and 2.
-    // Event 1 is end of cycle, and resets L timer
-    // Event 2 is halfway through, and sets output low
-    // Event 3 is start of cycle, and sets output high
-    LPC_SCT->EVENT[0].CTRL  = 0x5000;
+    LPC_SCT->MATCH[1].L     = 0;
+    LPC_SCT->MATCHREL[1].L  = 0;
+    LPC_SCT->MATCH[2].L     = SW_MATCH_HALF_PERIOD;
+    LPC_SCT->MATCHREL[2].L  = SW_MATCH_HALF_PERIOD;
+
+    LPC_SCT->EVENT[0].CTRL  = 0x5001;
     LPC_SCT->EVENT[0].STATE = 0x01;
-    LPC_SCT->EVENT[1].CTRL  = 0x5001;
+    LPC_SCT->EVENT[1].CTRL  = 0x5002;
     LPC_SCT->EVENT[1].STATE = 0x01;
-    LPC_SCT->EVENT[2].CTRL  = 0x5002;
+    
+    LPC_SCT->OUT[0].SET     = 0x01;
+    LPC_SCT->OUT[0].CLR     = 0x0a;     // Also turned off by event 3 (see below)
+
+    // ----------------------------------------
+    // -- H timer - modulates L timer on/off --
+    
+    // Match reg 0 defines overall H timer cycle.
+    // Event 2 turns on timer L, and occurs at start of H cycle (via match reg 1)
+    LPC_SCT->MATCH[1].H     = 0;
+    LPC_SCT->MATCHREL[1].H  = 0;
+    LPC_SCT->EVENT[2].CTRL  = 0x5011;
     LPC_SCT->EVENT[2].STATE = 0x01;
+    LPC_SCT->START_L        = 0x04;
     
-    // Set up counter limit on event 1 to restart
-    LPC_SCT->LIMIT_L        = 0x01;
-    
-    // Set up H timer to act as modulator
-    LPC_SCT->EVENT[3].CTRL  = 0x5010;       // match reg 0 H
+    // Event 3 turns off timer L and output, and occurs in middle portion of H cycle
+    // (via match reg 1) - and fires interrupt to configure the following H cycle.
+    LPC_SCT->EVENT[3].CTRL  = 0x5012;
     LPC_SCT->EVENT[3].STATE = 0x01;
-    LPC_SCT->LIMIT_H        = 0x08;         // event 3 is end of cycle
-    LPC_SCT->EVEN           = 0x08;         // event 3 fires interrupt
+    LPC_SCT->STOP_L         = 0x08;
+    LPC_SCT->EVEN           = 0x08;
+    
     NVIC_EnableIRQ(SCT_IRQn);
 }
 
 void sctSquareWaveOn() {
-    LPC_SCT->MATCH[0].H = SW_MODULATE_PERIOD_ON;
-    sctSquareWaveModulateOff(); // second cycle turns off output    
-    LPC_SCT->CTRL_U &= ~((1<<2)|(1<<18));   // Start counters
+    // Full implementation for IR send should clear event 1
+    // from halting timers and clearing output
+     
+    // Set L counter into stopped but unhalted
+    uint16_t ctrl_l = LPC_SCT->CTRL_L;
+    ctrl_l &= ~(1<<2);
+    ctrl_l |= 1<<1;
+    LPC_SCT->CTRL_L = ctrl_l;
+    
+    // Configure & start H counter (which will start L counter)
+    LPC_SCT->MATCH[0].H  = SW_MODULATE_PERIOD_A_ON + SW_MODULATE_PERIOD_A_OFF;
+    LPC_SCT->MATCH[2].H  = SW_MODULATE_PERIOD_A_ON;
+    g_nextSctModulate    = 1;
+    LPC_SCT->CTRL_H &= ~(1<<2);   
 }
 
 void sctSquareWaveOff() {
@@ -242,7 +238,6 @@ int main () {
     puts("Waiting...");
     while (true) {
         __WFI();
-        puts("Msg received");
     }
 }
 
