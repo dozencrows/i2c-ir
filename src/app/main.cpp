@@ -55,34 +55,20 @@ void initMainClock() {
 #define SW_MODULATE_PERIOD_B_ON   2000
 #define SW_MODULATE_PERIOD_B_OFF  2000
 
-volatile int g_nextSctModulate = 0;
-
-void sctSquareWaveModulateA() {
-    LPC_SCT->MATCHREL[0].H  = SW_MODULATE_PERIOD_A_ON + SW_MODULATE_PERIOD_A_OFF;
-    LPC_SCT->MATCHREL[2].H  = SW_MODULATE_PERIOD_A_ON;
-}
-
-void sctSquareWaveModulateB() {
-    LPC_SCT->MATCHREL[0].H  = SW_MODULATE_PERIOD_B_ON + SW_MODULATE_PERIOD_B_OFF;
-    LPC_SCT->MATCHREL[2].H  = SW_MODULATE_PERIOD_B_ON;
-}
-
+// Times are in tenths of uS
+uint16_t g_testWaveForm[] = { 24000, 6000, 12000, 6000, 6000, 6000, 0, 0 };
+volatile int g_nextCycle = 0;
 
 extern "C" void SCT_IRQHandler(void) {
-    g_nextSctModulate++;
-    
-    if (g_nextSctModulate == 4) {
+    if (g_testWaveForm[g_nextCycle]) {
+        LPC_SCT->MATCHREL[2].H  = g_testWaveForm[g_nextCycle];
+        LPC_SCT->MATCHREL[0].H  = g_testWaveForm[g_nextCycle++] + g_testWaveForm[g_nextCycle++];
+    }
+    else {
         // To finish, event 0 set to halt both timers and clear output
         LPC_SCT->HALT_L     = 0x01;
         LPC_SCT->HALT_H     = 0x01;
         LPC_SCT->OUT[0].CLR = 0x01;
-    }
-    
-    if (g_nextSctModulate & 1) {
-        sctSquareWaveModulateB();
-    }
-    else {
-        sctSquareWaveModulateA();
     }
     
     LPC_SCT->EVFLAG |= 0xf;
@@ -150,9 +136,9 @@ void sctSquareWaveOn() {
     LPC_SCT->CTRL_L = ctrl_l;
     
     // Configure & start H counter (which will start L counter)
-    LPC_SCT->MATCH[0].H  = SW_MODULATE_PERIOD_A_ON + SW_MODULATE_PERIOD_A_OFF;
-    LPC_SCT->MATCH[2].H  = SW_MODULATE_PERIOD_A_ON;
-    g_nextSctModulate    = 0;
+    g_nextCycle = 0;
+    LPC_SCT->MATCH[2].H  = g_testWaveForm[g_nextCycle];
+    LPC_SCT->MATCH[0].H  = g_testWaveForm[g_nextCycle++] + g_testWaveForm[g_nextCycle++];
     
     LPC_SCT->CTRL_U |= (1<<3)|(1<<19);  // Clear counters
     LPC_SCT->CTRL_H &= ~(1<<2);   
