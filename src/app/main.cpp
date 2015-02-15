@@ -60,29 +60,32 @@ volatile int g_nextSctModulate = 0;
 void sctSquareWaveModulateA() {
     LPC_SCT->MATCHREL[0].H  = SW_MODULATE_PERIOD_A_ON + SW_MODULATE_PERIOD_A_OFF;
     LPC_SCT->MATCHREL[2].H  = SW_MODULATE_PERIOD_A_ON;
-    g_nextSctModulate       = 1;
 }
 
 void sctSquareWaveModulateB() {
     LPC_SCT->MATCHREL[0].H  = SW_MODULATE_PERIOD_B_ON + SW_MODULATE_PERIOD_B_OFF;
     LPC_SCT->MATCHREL[2].H  = SW_MODULATE_PERIOD_B_ON;
-    g_nextSctModulate       = 0;
 }
 
+
 extern "C" void SCT_IRQHandler(void) {
-    // For full IR send implementation, this handler should do the following:
-    // * If sequence end reached
-    //   * Configure event 1 to halt both timers and clear output
-    // * Else
-    //   * Load next H cycle period values into H timer match regs 0 and 2
-    //
-    if (g_nextSctModulate) {
+    g_nextSctModulate++;
+    
+    if (g_nextSctModulate == 4) {
+        // To finish, event 0 set to halt both timers and clear output
+        LPC_SCT->HALT_L     = 0x01;
+        LPC_SCT->HALT_H     = 0x01;
+        LPC_SCT->OUT[0].CLR = 0x01;
+    }
+    
+    if (g_nextSctModulate & 1) {
         sctSquareWaveModulateB();
     }
     else {
         sctSquareWaveModulateA();
     }
-    LPC_SCT->EVFLAG = 0;
+    
+    LPC_SCT->EVFLAG |= 0xf;
 }
 
 void initSCTSquareWave() {
@@ -98,7 +101,7 @@ void initSCTSquareWave() {
     // -- L timer - generates carrier square wave at 38kHz --
 
     // Use match reg 0 to define end of cycle, and act as auto limit
-    // Use match regs 1 and 2 to define events 1 and 2 for start and
+    // Use match regs 1 and 2 to define events 0 and 1 for start and
     // middle of cycle, turning output on and off respectively
     LPC_SCT->MATCH[0].L     = SW_MATCH_PERIOD;
     LPC_SCT->MATCHREL[0].L  = SW_MATCH_PERIOD;
@@ -113,7 +116,6 @@ void initSCTSquareWave() {
     LPC_SCT->EVENT[1].STATE = 0x01;
     
     LPC_SCT->OUT[0].SET     = 0x01;
-    LPC_SCT->OUT[0].CLR     = 0x0a;     // Also turned off by event 3 (see below)
 
     // ----------------------------------------
     // -- H timer - modulates L timer on/off --
@@ -127,18 +129,19 @@ void initSCTSquareWave() {
     LPC_SCT->START_L        = 0x04;
     
     // Event 3 turns off timer L and output, and occurs in middle portion of H cycle
-    // (via match reg 1) - and fires interrupt to configure the following H cycle.
+    // (via match reg 2) - and fires interrupt to configure the following H cycle.
     LPC_SCT->EVENT[3].CTRL  = 0x5012;
     LPC_SCT->EVENT[3].STATE = 0x01;
     LPC_SCT->STOP_L         = 0x08;
     LPC_SCT->EVEN           = 0x08;
-    
+
     NVIC_EnableIRQ(SCT_IRQn);
 }
 
 void sctSquareWaveOn() {
-    // Full implementation for IR send should clear event 1
-    // from halting timers and clearing output
+    LPC_SCT->HALT_L     = 0x00;
+    LPC_SCT->HALT_H     = 0x00;
+    LPC_SCT->OUT[0].CLR = 0x0a;     // events 1 and 3 clear output
      
     // Set L counter into stopped but unhalted
     uint16_t ctrl_l = LPC_SCT->CTRL_L;
@@ -149,7 +152,9 @@ void sctSquareWaveOn() {
     // Configure & start H counter (which will start L counter)
     LPC_SCT->MATCH[0].H  = SW_MODULATE_PERIOD_A_ON + SW_MODULATE_PERIOD_A_OFF;
     LPC_SCT->MATCH[2].H  = SW_MODULATE_PERIOD_A_ON;
-    g_nextSctModulate    = 1;
+    g_nextSctModulate    = 0;
+    
+    LPC_SCT->CTRL_U |= (1<<3)|(1<<19);  // Clear counters
     LPC_SCT->CTRL_H &= ~(1<<2);   
 }
 
