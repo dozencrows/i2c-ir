@@ -56,7 +56,7 @@ void initMainClock() {
 #define SW_MODULATE_PERIOD_B_OFF  2000
 
 // Times are in tenths of uS
-uint16_t g_testWaveForm[]   = { 24000, 6000, 12000, 6000, 6000, 6000, 0, 0 };
+uint16_t g_testWaveForm[]   = { 2400, 600, 1200, 600, 600, 600, 0, 0 };
 volatile int g_nextCycle    = 0;
 volatile int g_waveDone     = 0;
 int g_repeatCount           = 0;
@@ -154,7 +154,9 @@ void sctSendSignal(int repeats) {
     
     LPC_SCT->EVEN = 0x08;
     g_waveDone = 0;
-    LPC_SCT->CTRL_U |= (1<<3)|(1<<19);  // Clear counters
+    LPC_SCT->CTRL_L |= (1<<3);          // Clear L counter
+    LPC_SCT->CTRL_H |= (1<<3)|(9<<5);   // Clear H counter, set prescale divide to factor of 10
+                                        // so that H counter is in microseconds
     
     if (repeats > 0) {
         g_repeatCount = repeats;
