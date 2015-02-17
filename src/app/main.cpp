@@ -7,16 +7,43 @@
 
 #include <string.h>
 
+const char hexdigit[] = "0123456789abcdef";
+
+void puthex8(uint8_t v) {
+    putchar(hexdigit[(v >> 4) & 0xf]);
+    putchar(hexdigit[v & 0xf]);
+}
+
+void puthex32(unsigned int v) {
+    for (int i = 24; i >= 0; i-=4) {
+        putchar(hexdigit[(v >> i) & 0xf]);
+    }
+}
+
 #define FIXED_CLOCK_RATE_HZ     10000000
 #define FIXED_UART_BAUD_RATE    115200
+
+#define IR_STAGE_COUNT  64
+
+typedef union IrRegisters {
+    struct {
+        uint8_t     status;
+        uint8_t     repeats;
+        uint8_t     repeat_delay;
+        uint8_t     length;
+        uint16_t    timing[IR_STAGE_COUNT];
+    } v;
+    uint8_t         m[4 + IR_STAGE_COUNT * sizeof(uint16_t)];
+} IrRegisters;
 
 uint32_t i2cBuffer[24];     // data area used by ROM-based I2C driver
 I2C_HANDLE_T* ih;           // opaque handle used by ROM-based I2C driver
 I2C_PARAM_T i2cParam;       // input parameters for pending I2C request
 I2C_RESULT_T i2cResult;     // return values for pending I2C request
 
-uint8_t i2cRecvBuf[2];      // receive buffer: address + register number
-uint8_t i2cSendBuf[32];     // send buffer 
+#define I2C_RECV_SIZE   (sizeof(IrRegisters) + 2)
+uint8_t i2cRecvBuf[I2C_RECV_SIZE];  // receive buffer: address + register number + data
+uint8_t i2cSendBuf[2];              // send buffer: address + status register
 
 void timersInit() {
     LPC_SYSCON->SYSAHBCLKCTRL |= (1<<10);    // enable MRT clock
@@ -49,26 +76,19 @@ void initMainClock() {
 #define SW_MATCH_PERIOD         (FIXED_CLOCK_RATE_HZ / SW_FREQ)
 #define SW_MATCH_HALF_PERIOD    (SW_MATCH_PERIOD / 2)
 
-#define SW_MODULATE_PERIOD_A_ON   1000
-#define SW_MODULATE_PERIOD_A_OFF  1000
-
-#define SW_MODULATE_PERIOD_B_ON   2000
-#define SW_MODULATE_PERIOD_B_OFF  2000
-
 // Times are in tenths of uS
-uint16_t g_testWaveForm[]   = { 2400, 600, 1200, 600, 600, 600, 0, 0 };
-volatile int g_nextCycle    = 0;
-volatile int g_waveDone     = 0;
-int g_repeatCount           = 0;
-int g_repeatDelayMs         = 2; 
+volatile uint8_t g_nextCycle    = 0;
+volatile uint8_t g_waveDone     = 0;
+uint8_t g_repeatCount           = 0;
+IrRegisters g_irRegisters;
 
 extern "C" void SCT_IRQHandler(void) {
     uint32_t events = LPC_SCT->EVFLAG;
     
     if (events & 0x08) {
-        if (g_testWaveForm[g_nextCycle]) {
-            LPC_SCT->MATCHREL[2].H  = g_testWaveForm[g_nextCycle];
-            LPC_SCT->MATCHREL[0].H  = g_testWaveForm[g_nextCycle++] + g_testWaveForm[g_nextCycle++];
+        if (g_nextCycle < g_irRegisters.v.length) {
+            LPC_SCT->MATCHREL[2].H  = g_irRegisters.v.timing[g_nextCycle];
+            LPC_SCT->MATCHREL[0].H  = g_irRegisters.v.timing[g_nextCycle++] + g_irRegisters.v.timing[g_nextCycle++];
         }
         else {
             // To finish, event 0 set to halt both timers, clear output and fire final event
@@ -85,8 +105,9 @@ extern "C" void SCT_IRQHandler(void) {
     LPC_SCT->EVFLAG = events;
 }
 
-void initSCTSquareWave() {
-
+void initIR() {
+    memset(&g_irRegisters, 0, sizeof(g_irRegisters));
+    
     // ---------------------------------
     // -- Common timer initialisation --
     
@@ -136,7 +157,7 @@ void initSCTSquareWave() {
     NVIC_EnableIRQ(SCT_IRQn);
 }
 
-void sctSendSignal(int repeats) {
+void irSendSignal(int repeats) {
     LPC_SCT->HALT_L     = 0x00;
     LPC_SCT->HALT_H     = 0x00;
     LPC_SCT->OUT[0].CLR = 0x0a;     // events 1 and 3 clear output
@@ -149,8 +170,8 @@ void sctSendSignal(int repeats) {
     
     // Configure & start H counter (which will start L counter)
     g_nextCycle = 0;
-    LPC_SCT->MATCH[2].H  = g_testWaveForm[g_nextCycle];
-    LPC_SCT->MATCH[0].H  = g_testWaveForm[g_nextCycle++] + g_testWaveForm[g_nextCycle++];
+    LPC_SCT->MATCH[2].H  = g_irRegisters.v.timing[g_nextCycle];
+    LPC_SCT->MATCH[0].H  = g_irRegisters.v.timing[g_nextCycle++] + g_irRegisters.v.timing[g_nextCycle++];
     
     LPC_SCT->EVEN = 0x08;
     g_waveDone = 0;
@@ -165,7 +186,7 @@ void sctSendSignal(int repeats) {
     LPC_SCT->CTRL_H &= ~(1<<2);   
 }
 
-void sctStopSignal() {
+void irStopSignal() {
     LPC_SCT->CTRL_U |= (1<<2)|(1<<18);  // Halt counters
     LPC_SCT->CTRL_U |= (1<<3)|(1<<19);  // Clear counters
     LPC_SCT->OUTPUT = 0;                // Clear output
@@ -173,13 +194,12 @@ void sctStopSignal() {
     g_waveDone = 0;
 }
 
-void sctUpdateSignal() {
+void irUpdateSignal() {
     if (g_waveDone) {
         g_repeatCount--;
         if (g_repeatCount) {
-            delayMs(g_repeatDelayMs);
-            //puts("Repeat...");
-            sctSendSignal(0);
+            delayMs(g_irRegisters.v.repeat_delay);
+            irSendSignal(0);
         }
         else {
             puts("Done.");
@@ -188,7 +208,19 @@ void sctUpdateSignal() {
     }
 }
 
-void i2cSetupRecv (), i2cSetupSend (int);
+//
+// Notes on I2C...
+//
+// i2cset -y 1 0x70 A V b           - sends 3 bytes: 0xe0 A V where A is address and V is value
+// i2cset -y 1 0x70 A V1 V2 V3 i    - sends 5 bytes: 0xe0 A V1 V2 V3
+//
+// Looks like i2c_slave_receive_intr expects exactly the given number of bytes to be received to
+// then call the callback... if sent less, it accumulates those in the buffer until a send happens
+// with the right number expected (and corresponding stop bit).
+//
+// It would seem that a more custom I2C driver needs writing...
+ 
+void i2cSetupRecv (), i2cSetupSend (uint8_t, uint8_t);
 
 void i2cSetup () {
     for (int i = 0; i < 3000000; ++i) __ASM("");
@@ -196,7 +228,7 @@ void i2cSetup () {
     LPC_SWM->PINENABLE0 |= 3<<2;            // disable SWCLK and SWDIO
     LPC_SWM->PINASSIGN7 = 0x02FFFFFF;       // SDA on P2, pin 4
     LPC_SWM->PINASSIGN8 = 0xFFFFFF03;       // SCL on P3, pin 3
-    LPC_SYSCON->SYSAHBCLKCTRL |= 1<<5;  // enable I2C clock
+    LPC_SYSCON->SYSAHBCLKCTRL |= 1<<5;      // enable I2C clock
 
     ih = LPC_I2CD_API->i2c_setup(LPC_I2C_BASE, i2cBuffer);
     LPC_I2CD_API->i2c_set_slave_addr(ih, 0x70<<1, 0);
@@ -208,10 +240,20 @@ extern "C" void I2C0_IRQHandler () {
     LPC_I2CD_API->i2c_isr_handler(ih);
 }
 
-void i2cRecvDone (uint32_t err, uint32_t) {
+void i2cRecvDone (uint32_t err, uint32_t n) {
+    puthex32(err);
+    putchar(' ');
+    puthex32(n);
+    putchar('\n');
+    
     i2cSetupRecv();
-    if (err == 0)
-        i2cSetupSend(i2cRecvBuf[1]);
+    if (err == 0) {
+        for (int i = 0; i < n; i++) {
+            puthex8(i2cRecvBuf[i]);
+            putchar(' ');
+        }
+        putchar('\n');
+    }
 }
 
 void i2cSendDone (uint32_t err, uint32_t) {
@@ -221,37 +263,17 @@ void i2cSendDone (uint32_t err, uint32_t) {
 void i2cSetupRecv () {
     i2cParam.func_pt = i2cRecvDone;
     i2cParam.num_bytes_send = 0;
-    i2cParam.num_bytes_rec = 2;
+    i2cParam.num_bytes_rec = 8; //I2C_RECV_SIZE;
     i2cParam.buffer_ptr_rec = i2cRecvBuf;
+    i2cParam.stop_flag = 1;
     LPC_I2CD_API->i2c_slave_receive_intr(ih, &i2cParam, &i2cResult);
 }
 
-void i2cSetupSend (int regNum) {
+void i2cSetupSend (uint8_t value) {
     i2cParam.func_pt = i2cSendDone;
     i2cParam.num_bytes_rec = 0;
-    switch (regNum) {
-        case 0:
-            i2cParam.num_bytes_send = 1;
-            i2cSendBuf[0] = 0xff;
-            break;
-            
-        case 1:
-            i2cParam.num_bytes_send = 16;
-            strcpy((char*)i2cSendBuf, "0123456789ABCDEF");
-            break;
-
-        case 2:
-            i2cParam.num_bytes_send = 1;
-            i2cSendBuf[0] = 0xfe;
-            sctSendSignal(3);
-            break;
-
-        case 3:
-            i2cParam.num_bytes_send = 1;
-            i2cSendBuf[0] = 0xfd;
-            sctStopSignal();
-            break;
-    }
+    i2cParam.num_bytes_send = 1;
+    i2cSendBuf[0] = value;
     i2cParam.buffer_ptr_send = i2cSendBuf;
     LPC_I2CD_API->i2c_slave_transmit_intr(ih, &i2cParam, &i2cResult);
 }
@@ -264,11 +286,11 @@ int main () {
     puts("i2c-ir started");
     i2cSetup();
     i2cSetupRecv();
-    initSCTSquareWave();
+    initIR();
     puts("Waiting...");
     while (true) {
         __WFI();
-        sctUpdateSignal();
+        irUpdateSignal();
     }
 }
 
