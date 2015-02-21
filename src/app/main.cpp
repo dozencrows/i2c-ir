@@ -2,7 +2,6 @@
 
 #include "LPC8xx.h"
 #include "lpc_types.h"
-#include "romapi_8xx.h"
 #include "serial.h"
 
 #include <string.h>
@@ -35,15 +34,6 @@ typedef union IrRegisters {
     } v;
     uint8_t         m[4 + IR_STAGE_COUNT * sizeof(uint16_t)];
 } IrRegisters;
-
-uint32_t i2cBuffer[24];     // data area used by ROM-based I2C driver
-I2C_HANDLE_T* ih;           // opaque handle used by ROM-based I2C driver
-I2C_PARAM_T i2cParam;       // input parameters for pending I2C request
-I2C_RESULT_T i2cResult;     // return values for pending I2C request
-
-#define I2C_RECV_SIZE   (sizeof(IrRegisters) + 2)
-uint8_t i2cRecvBuf[I2C_RECV_SIZE];  // receive buffer: address + register number + data
-uint8_t i2cSendBuf[2];              // send buffer: address + status register
 
 void timersInit() {
     LPC_SYSCON->SYSAHBCLKCTRL |= (1<<10);    // enable MRT clock
@@ -214,13 +204,18 @@ void irUpdateSignal() {
 // i2cset -y 1 0x70 A V b           - sends 3 bytes: 0xe0 A V where A is address and V is value
 // i2cset -y 1 0x70 A V1 V2 V3 i    - sends 5 bytes: 0xe0 A V1 V2 V3
 //
-// Looks like i2c_slave_receive_intr expects exactly the given number of bytes to be received to
-// then call the callback... if sent less, it accumulates those in the buffer until a send happens
-// with the right number expected (and corresponding stop bit).
+// i2cdump =y -r N-M 1 0x70 c       - sends e0 N | (e1 rx |) x (M-N+1)
 //
-// It would seem that a more custom I2C driver needs writing...
- 
-void i2cSetupRecv (), i2cSetupSend (uint8_t, uint8_t);
+
+#define I2C_CFG_SLVEN           0x02
+#define I2C_SLVPENDING          (1<<8)
+#define I2C_SLVDESELCT          (1<<15)
+#define I2C_STAT_SLVSTATE       (3<<9)
+#define I2C_STAT_SLVST_ADDR     0x00
+#define I2C_STAT_SLVST_RX       (1<<9)
+#define I2C_STAT_SLVST_TX       (2<<9)
+#define I2C_SLVCTL_SLVCONTINUE  0x01
+#define I2C_SLVCTL_SLVNAK       0x02
 
 void i2cSetup () {
     for (int i = 0; i < 3000000; ++i) __ASM("");
@@ -228,54 +223,83 @@ void i2cSetup () {
     LPC_SWM->PINENABLE0 |= 3<<2;            // disable SWCLK and SWDIO
     LPC_SWM->PINASSIGN7 = 0x02FFFFFF;       // SDA on P2, pin 4
     LPC_SWM->PINASSIGN8 = 0xFFFFFF03;       // SCL on P3, pin 3
-    LPC_SYSCON->SYSAHBCLKCTRL |= 1<<5;      // enable I2C clock
+    LPC_IOCON->PIO0_2 &= ~(0x18);           // Disable pullups
+    LPC_IOCON->PIO0_3 &= ~(0x18);           // Disable pullups
 
-    ih = LPC_I2CD_API->i2c_setup(LPC_I2C_BASE, i2cBuffer);
-    LPC_I2CD_API->i2c_set_slave_addr(ih, 0x70<<1, 0);
+    LPC_SYSCON->SYSAHBCLKCTRL |= 1<<5;      // enable I2C clock
+    LPC_SYSCON->PRESETCTRL &= ~(1<<6);      // reset I2C
+    LPC_SYSCON->PRESETCTRL |=  (1<<6);
+    
+    // Configure I2C: address, slave mode, interrupt on slave pending or deselect
+    LPC_I2C->SLVADR0    = 0x70 << 1;
+    LPC_I2C->CFG        = I2C_CFG_SLVEN;
+    LPC_I2C->INTENSET   = I2C_SLVPENDING | I2C_SLVDESELCT;
 
     NVIC_EnableIRQ(I2C_IRQn);
 }
 
+#define I2C_RX_ADDR             0x01
+#define I2C_RX_DATA             0x02
+#define I2C_TX_DATA             0x03
+#define I2C_SLV_DESEL           0x04
+#define I2C_BUFFER_SIZE         8
+#define I2C_BUFFER_NEXT(x)      ((x + 1) & (I2C_BUFFER_SIZE - 1))
+
+typedef struct I2CPacket {
+    uint8_t op;
+    uint8_t data;
+} I2CPacket;
+
+volatile I2CPacket g_i2cBuffer[I2C_BUFFER_SIZE];
+volatile int g_i2cBufferWrite = 0;
+int g_i2cBufferRead = 0;
+
 extern "C" void I2C0_IRQHandler () {
-    LPC_I2CD_API->i2c_isr_handler(ih);
-}
+    uint8_t data = 0x0;
+    uint8_t op = 0x0;
+    uint32_t intstat = LPC_I2C->INTSTAT;     
 
-void i2cRecvDone (uint32_t err, uint32_t n) {
-    puthex32(err);
-    putchar(' ');
-    puthex32(n);
-    putchar('\n');
-    
-    i2cSetupRecv();
-    if (err == 0) {
-        for (int i = 0; i < n; i++) {
-            puthex8(i2cRecvBuf[i]);
-            putchar(' ');
+    if (intstat & I2C_SLVPENDING) {
+        uint32_t state = LPC_I2C->STAT & I2C_STAT_SLVSTATE;
+        data = LPC_I2C->SLVDAT;
+        switch (state) {
+            case I2C_STAT_SLVST_ADDR:
+                op = I2C_RX_ADDR;
+                break;
+            case I2C_STAT_SLVST_RX:
+                op = I2C_RX_DATA;
+                break;
+            case I2C_STAT_SLVST_TX:
+                op = I2C_TX_DATA;
+                break;
+            default:
+                break;
         }
-        putchar('\n');
+        
+        LPC_I2C->SLVCTL = I2C_SLVCTL_SLVCONTINUE; // ack
     }
+    
+    if (intstat & I2C_SLVDESELCT) {
+        op = I2C_SLV_DESEL;
+        LPC_I2C->STAT |= I2C_SLVDESELCT;
+    }
+    
+    volatile I2CPacket* packet = g_i2cBuffer + g_i2cBufferWrite;
+    packet->op = op;
+    packet->data = data;
+    g_i2cBufferWrite = I2C_BUFFER_NEXT(g_i2cBufferWrite);
 }
 
-void i2cSendDone (uint32_t err, uint32_t) {
-    i2cSetupRecv();
-}
-
-void i2cSetupRecv () {
-    i2cParam.func_pt = i2cRecvDone;
-    i2cParam.num_bytes_send = 0;
-    i2cParam.num_bytes_rec = 8; //I2C_RECV_SIZE;
-    i2cParam.buffer_ptr_rec = i2cRecvBuf;
-    i2cParam.stop_flag = 1;
-    LPC_I2CD_API->i2c_slave_receive_intr(ih, &i2cParam, &i2cResult);
-}
-
-void i2cSetupSend (uint8_t value) {
-    i2cParam.func_pt = i2cSendDone;
-    i2cParam.num_bytes_rec = 0;
-    i2cParam.num_bytes_send = 1;
-    i2cSendBuf[0] = value;
-    i2cParam.buffer_ptr_send = i2cSendBuf;
-    LPC_I2CD_API->i2c_slave_transmit_intr(ih, &i2cParam, &i2cResult);
+void i2cBufferRead() {
+    while (g_i2cBufferRead != g_i2cBufferWrite) {
+        volatile I2CPacket* packet = g_i2cBuffer + g_i2cBufferRead;
+        puthex8(packet->op);
+        putchar(' ');
+        puthex8(packet->data);
+        putchar('\n');
+        
+        g_i2cBufferRead = I2C_BUFFER_NEXT(g_i2cBufferRead);
+    }
 }
 
 int main () {
@@ -285,12 +309,12 @@ int main () {
     delayMs(100);
     puts("i2c-ir started");
     i2cSetup();
-    i2cSetupRecv();
-    initIR();
+    //initIR();
     puts("Waiting...");
     while (true) {
         __WFI();
-        irUpdateSignal();
+        i2cBufferRead();
+        //irUpdateSignal();
     }
 }
 
