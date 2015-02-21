@@ -1,10 +1,14 @@
-// Report data as I2C slave on address 0x70.
+//#define DEBUG
 
 #include "LPC8xx.h"
 #include "lpc_types.h"
-#include "serial.h"
 
 #include <string.h>
+
+#if defined(DEBUG)
+#define FIXED_UART_BAUD_RATE    115200
+
+#include "serial.h"
 
 const char hexdigit[] = "0123456789abcdef";
 
@@ -18,9 +22,9 @@ void puthex32(unsigned int v) {
         putchar(hexdigit[(v >> i) & 0xf]);
     }
 }
+#endif
 
 #define FIXED_CLOCK_RATE_HZ     10000000
-#define FIXED_UART_BAUD_RATE    115200
 
 #define IR_STAGE_COUNT  64
 
@@ -148,6 +152,8 @@ void initIR() {
 }
 
 void irSendSignal(int repeats) {
+    g_irRegisters.v.status = 1;
+    
     LPC_SCT->HALT_L     = 0x00;
     LPC_SCT->HALT_H     = 0x00;
     LPC_SCT->OUT[0].CLR = 0x0a;     // events 1 and 3 clear output
@@ -182,6 +188,7 @@ void irStopSignal() {
     LPC_SCT->OUTPUT = 0;                // Clear output
     g_repeatCount = 0;
     g_waveDone = 0;
+    g_irRegisters.v.status = 0;
 }
 
 void irUpdateSignal() {
@@ -192,8 +199,10 @@ void irUpdateSignal() {
             irSendSignal(0);
         }
         else {
-            puts("Done.");
-            g_waveDone = 0;
+#if defined(DEBUG)        
+            puts("Sent");
+#endif
+            irStopSignal();
         }
     }
 }
@@ -218,7 +227,7 @@ void irUpdateSignal() {
 #define I2C_SLVCTL_SLVNAK       0x02
 
 void i2cSetup () {
-    for (int i = 0; i < 3000000; ++i) __ASM("");
+    //for (int i = 0; i < 3000000; ++i) __ASM("");
 
     LPC_SWM->PINENABLE0 |= 3<<2;            // disable SWCLK and SWDIO
     LPC_SWM->PINASSIGN7 = 0x02FFFFFF;       // SDA on P2, pin 4
@@ -238,83 +247,112 @@ void i2cSetup () {
     NVIC_EnableIRQ(I2C_IRQn);
 }
 
-#define I2C_RX_ADDR             0x01
-#define I2C_RX_DATA             0x02
-#define I2C_TX_DATA             0x03
-#define I2C_SLV_DESEL           0x04
-#define I2C_BUFFER_SIZE         8
-#define I2C_BUFFER_NEXT(x)      ((x + 1) & (I2C_BUFFER_SIZE - 1))
+#define I2C_STATE_IDLE          0
+#define I2C_STATE_RX_REGISTER   1
+#define I2C_STATE_RX_DATA       2
+#define I2C_STATE_TX_DATA       3
 
-typedef struct I2CPacket {
-    uint8_t op;
-    uint8_t data;
-} I2CPacket;
-
-volatile I2CPacket g_i2cBuffer[I2C_BUFFER_SIZE];
-volatile int g_i2cBufferWrite = 0;
-int g_i2cBufferRead = 0;
+unsigned int g_currRegister = 0;
+unsigned int g_i2cState = I2C_STATE_IDLE;
 
 extern "C" void I2C0_IRQHandler () {
-    uint8_t data = 0x0;
-    uint8_t op = 0x0;
-    uint32_t intstat = LPC_I2C->INTSTAT;     
+    uint32_t intstat    = LPC_I2C->INTSTAT;
 
     if (intstat & I2C_SLVPENDING) {
-        uint32_t state = LPC_I2C->STAT & I2C_STAT_SLVSTATE;
-        data = LPC_I2C->SLVDAT;
+        uint32_t state  = LPC_I2C->STAT & I2C_STAT_SLVSTATE;
+        uint32_t result = I2C_SLVCTL_SLVCONTINUE;
+        uint8_t  data   = LPC_I2C->SLVDAT;
+
         switch (state) {
             case I2C_STAT_SLVST_ADDR:
-                op = I2C_RX_ADDR;
+                g_i2cState = I2C_STATE_RX_REGISTER;
                 break;
+                
             case I2C_STAT_SLVST_RX:
-                op = I2C_RX_DATA;
+                switch (g_i2cState) {
+                    case I2C_STATE_RX_REGISTER:
+                        g_currRegister = data;
+                        g_i2cState = I2C_STATE_RX_DATA;
+                        break;
+
+                    case I2C_STATE_RX_DATA:
+                        if (g_irRegisters.v.status) {
+                            result = I2C_SLVCTL_SLVNAK;
+                        }
+                        else if (g_currRegister > 0 && g_currRegister < sizeof(IrRegisters)) {
+                            g_irRegisters.m[g_currRegister++] = data;
+                        }
+                        break;
+                };
                 break;
+                
             case I2C_STAT_SLVST_TX:
-                op = I2C_TX_DATA;
+                g_i2cState = I2C_STATE_TX_DATA;
+                if (g_currRegister == 0) {
+                    LPC_I2C->SLVDAT = g_irRegisters.v.status;
+                }
+                else {
+                    LPC_I2C->SLVDAT = 0;
+                    result = I2C_SLVCTL_SLVNAK;
+                }
                 break;
+                
             default:
+                g_i2cState = I2C_STATE_IDLE;
                 break;
         }
-        
-        LPC_I2C->SLVCTL = I2C_SLVCTL_SLVCONTINUE; // ack
+
+        if (result) {        
+            LPC_I2C->SLVCTL = result;
+        }
     }
     
     if (intstat & I2C_SLVDESELCT) {
-        op = I2C_SLV_DESEL;
-        LPC_I2C->STAT |= I2C_SLVDESELCT;
-    }
-    
-    volatile I2CPacket* packet = g_i2cBuffer + g_i2cBufferWrite;
-    packet->op = op;
-    packet->data = data;
-    g_i2cBufferWrite = I2C_BUFFER_NEXT(g_i2cBufferWrite);
-}
+        if (g_i2cState == I2C_STATE_RX_DATA && g_currRegister > offsetof(IrRegisters, v.timing)) {
 
-void i2cBufferRead() {
-    while (g_i2cBufferRead != g_i2cBufferWrite) {
-        volatile I2CPacket* packet = g_i2cBuffer + g_i2cBufferRead;
-        puthex8(packet->op);
-        putchar(' ');
-        puthex8(packet->data);
-        putchar('\n');
-        
-        g_i2cBufferRead = I2C_BUFFER_NEXT(g_i2cBufferRead);
+#if defined(DEBUG)        
+            puthex8(g_irRegisters.v.repeats);
+            putchar(' ');
+            puthex8(g_irRegisters.v.repeat_delay);
+            putchar(' ');
+            puthex8(g_irRegisters.v.length);
+            for (unsigned int i = 0; i < g_irRegisters.v.length; i++) {
+                putchar(' ');
+                puthex32(g_irRegisters.v.timing[i]);
+            }
+            putchar('\n');
+#endif
+
+            irSendSignal(g_irRegisters.v.repeats);
+        }
+        g_i2cState = I2C_STATE_IDLE;
+        LPC_I2C->STAT |= I2C_SLVDESELCT;
     }
 }
 
 int main () {
     initMainClock();
     timersInit();
+
+#if defined(DEBUG)        
     serial.init(LPC_USART0, FIXED_UART_BAUD_RATE);
     delayMs(100);
+#endif
+    
+#if defined(DEBUG)        
     puts("i2c-ir started");
+#endif
+
     i2cSetup();
-    //initIR();
+    initIR();
+
+#if defined(DEBUG)        
     puts("Waiting...");
+#endif
+
     while (true) {
         __WFI();
-        i2cBufferRead();
-        //irUpdateSignal();
+        irUpdateSignal();
     }
 }
 
