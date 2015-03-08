@@ -348,6 +348,15 @@ static void deepSleep() {
     SCB->SCR                = 0;
 }
 
+static void powerDown() {
+    LPC_SYSCON->STARTERP1   = (1 << 8); // I2C interrupt will wakeup 
+    LPC_PMU->PCON           = 0x02;     // select power down
+    SCB->SCR                = SCB_SCR_SLEEPDEEP_Msk;
+    __WFI();
+    LPC_PMU->PCON           = 0;
+    SCB->SCR                = 0;
+}
+
 int main () {
     initMainClock();
     timersInit();
@@ -373,7 +382,7 @@ int main () {
             __WFI();
         }
         else {
-            deepSleep();
+            powerDown();
         }
         irUpdateSignal();
     }
