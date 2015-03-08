@@ -71,6 +71,8 @@ void initMainClock() {
     LPC_SYSCON->MAINCLKUEN    = 0x00;
     LPC_SYSCON->MAINCLKUEN    = 0x01;
     while (!(LPC_SYSCON->MAINCLKUEN & 0x01));
+    
+    LPC_SYSCON->PDAWAKECFG   &= ~(1 << 7);      // Ensure PLL powers up after wakeup
 }
 
 #define SW_FREQ                 38000
@@ -337,6 +339,15 @@ extern "C" void I2C0_IRQHandler () {
     }
 }
 
+static void deepSleep() {
+    LPC_SYSCON->STARTERP1   = (1 << 8); // I2C interrupt will wakeup 
+    LPC_PMU->PCON           = 0x01;     // select deep sleep
+    SCB->SCR                = SCB_SCR_SLEEPDEEP_Msk;
+    __WFI();
+    LPC_PMU->PCON           = 0;
+    SCB->SCR                = 0;
+}
+
 int main () {
     initMainClock();
     timersInit();
@@ -358,7 +369,12 @@ int main () {
 #endif
 
     while (true) {
-        __WFI();
+        if (g_irRegisters.v.status) {
+            __WFI();
+        }
+        else {
+            deepSleep();
+        }
         irUpdateSignal();
     }
 }
