@@ -101,8 +101,8 @@ void initMainClock() {
 // Times are in tenths of uS
 volatile uint8_t g_nextCycle    = 0;
 volatile uint8_t g_waveDone     = 0;
-uint8_t g_repeatCount           = 0;
-IrRegisters g_irRegisters;
+volatile uint8_t g_repeatCount  = 0;
+volatile IrRegisters g_irRegisters;
 
 extern "C" void SCT_IRQHandler(void) {
     uint32_t events = LPC_SCT->EVFLAG;
@@ -128,7 +128,7 @@ extern "C" void SCT_IRQHandler(void) {
 }
 
 void initIR() {
-    memset(&g_irRegisters, 0, sizeof(g_irRegisters));
+    memset((void*)&g_irRegisters, 0, sizeof(g_irRegisters));
     
     // ---------------------------------
     // -- Common timer initialisation --
