@@ -32,8 +32,10 @@ void puthex32(unsigned int v) {
 #endif
 
 #define FIXED_CLOCK_RATE_HZ     10000000
-
+#define DELAY_MRT               2
+#define SLEEP_MRT               1
 #define IR_STAGE_COUNT  64
+#define DEFER_SLEEP_TIME_MS     4000
 
 typedef union IrRegisters {
     struct {
@@ -51,14 +53,29 @@ void timersInit() {
     LPC_SYSCON->PRESETCTRL &= ~(1<<7);       // reset MRT
     LPC_SYSCON->PRESETCTRL |=  (1<<7);
     
-    LPC_MRT->Channel[2].CTRL = (0x01 << 1); //MRT2 one-shot mode
+    LPC_MRT->Channel[SLEEP_MRT].CTRL = 0x03;        // Sleep timer in one-shot mode, interrupt generated
+    LPC_MRT->Channel[DELAY_MRT].CTRL = 0x01 << 1;   // Delay timer in one-shot mode, no interrupt generated
+    
+    NVIC_EnableIRQ(MRT_IRQn);
 }
 
 void delayMs(int milliseconds) {
-    LPC_MRT->Channel[2].INTVAL = (FIXED_CLOCK_RATE_HZ / 1000L) * milliseconds;
+    LPC_MRT->Channel[DELAY_MRT].INTVAL = (FIXED_CLOCK_RATE_HZ / 1000L) * milliseconds;
 
-    while (LPC_MRT->Channel[2].STAT & 0x02)
+    while (LPC_MRT->Channel[DELAY_MRT].STAT & 0x02)
         ; //wait while running
+}
+
+volatile uint8_t g_sleepFlag = 0;
+
+void deferSleep(int milliseconds) {
+    g_sleepFlag = 0;
+    LPC_MRT->Channel[SLEEP_MRT].INTVAL = (FIXED_CLOCK_RATE_HZ / 1000L) * milliseconds | (1 << 31);;
+}
+
+extern "C" void MRT_IRQHandler(void) {
+    g_sleepFlag = 1;
+    LPC_MRT->Channel[SLEEP_MRT].STAT = 0x1;
 }
 
 void initMainClock() {
@@ -336,6 +353,7 @@ extern "C" void I2C0_IRQHandler () {
         }
         g_i2cState = I2C_STATE_IDLE;
         LPC_I2C->STAT |= I2C_SLVDESELCT;
+        deferSleep(DEFER_SLEEP_TIME_MS);
     }
 }
 
@@ -377,12 +395,15 @@ int main () {
     puts("Waiting...");
 #endif
 
+    deferSleep(DEFER_SLEEP_TIME_MS);
+    
     while (true) {
-        if (g_irRegisters.v.status) {
-            __WFI();
+        if (g_sleepFlag && !g_irRegisters.v.status) {
+            powerDown();
+            deferSleep(DEFER_SLEEP_TIME_MS);
         }
         else {
-            powerDown();
+            __WFI();
         }
         irUpdateSignal();
     }
