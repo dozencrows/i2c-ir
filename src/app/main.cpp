@@ -90,6 +90,8 @@ void initMainClock() {
     while (!(LPC_SYSCON->MAINCLKUEN & 0x01));
     
     LPC_SYSCON->PDAWAKECFG   &= ~(1 << 7);      // Ensure PLL powers up after wakeup
+    
+    LPC_FLASHCTRL->FLASHCFG     = 0;            // Switch to zero wait-states for Flash
 }
 
 #define SW_FREQ                 38000
