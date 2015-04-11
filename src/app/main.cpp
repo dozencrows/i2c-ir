@@ -369,17 +369,25 @@ static void deepSleep() {
 }
 
 static void powerDown() {
-    LPC_SYSCON->STARTERP1   = (1 << 8); // I2C interrupt will wakeup 
-    LPC_PMU->PCON           = 0x02;     // select power down
+    LPC_SYSCON->STARTERP1   = (1 << 8);                 // I2C interrupt will wakeup 
+    LPC_PMU->PCON           = 0x02;                     // select power down
     SCB->SCR                = SCB_SCR_SLEEPDEEP_Msk;
     __WFI();
     LPC_PMU->PCON           = 0;
     SCB->SCR                = 0;
 }
 
+static void configureLowPowerPins() {
+    // Set PIO0_10 and 11 as low outputs, as they float.
+    // This saves some power
+    LPC_GPIO_PORT->DIR0 |= 3 << 10;
+    LPC_GPIO_PORT->CLR0  = 3 << 10;
+}
+
 int main () {
     initMainClock();
     timersInit();
+    configureLowPowerPins();
 
 #if defined(DEBUG)        
     serial.init(LPC_USART0, FIXED_UART_BAUD_RATE);
