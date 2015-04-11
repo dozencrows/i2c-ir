@@ -10,7 +10,7 @@ CXX = $(TRGT)g++
 CP = $(TRGT)objcopy
 
 # compiler and linker settings
-CFLAGS = -mcpu=cortex-m0plus -mthumb -I../common -O3 -ggdb
+CFLAGS = -mcpu=cortex-m0plus -mthumb -I../common -Os -ggdb
 CXXFLAGS = $(CFLAGS) -fno-rtti -fno-exceptions
 LDFLAGS = -Wl,--script=../common/LPC810.ld -nostartfiles -Wl,-Map=firmware.map
 
