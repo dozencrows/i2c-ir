@@ -136,7 +136,7 @@ void initIR() {
     LPC_SYSCON->SYSAHBCLKCTRL |= (1 << 8);  // Turn on the clock to the SCT
     LPC_SYSCON->PRESETCTRL &= ~(1<<8);      // reset SCT
     LPC_SYSCON->PRESETCTRL |=  (1<<8);
-    LPC_SWM->PINASSIGN6 = 0x01FFFFFF;       // Set up output pin - (ISP)
+    LPC_SWM->PINASSIGN6 = 0x00FFFFFF;       // Set up output pin - (RXD/PIO0_0)
     LPC_SCT->CONFIG = (1<<17)|(1<<18);      // H and L 16 bit counter timers, using match reg 0 each to limit
 
     // ------------------------------------------------------
